@@ -30,12 +30,8 @@ scoped_aligned_ptr<float> output;
 
 
 cl_mem velocity_buff, density_buff, abs_facts_buff;
-// buffer used in iteration
 cl_mem prev_buff, curr_buff, next_buff; 
-// buffer used to fill initial values
 cl_mem prev_init, curr_init, density_init; 
-cl_mem model_buff; 
-cl_mem local_density, local_prev, local_curr, local_indices; 
 
 bool use_fast_emulator = false;
 
@@ -186,7 +182,6 @@ void init_problem() {
   fields[2].reset(nx * nz);
   src.reset(time_steps);
 
-  //Set up artifial problem.
   for (int i = 0; i < nz; ++ i) {
     for (int j = 0; j < nx; ++ j) {
       float vel;
@@ -355,9 +350,6 @@ void run() {
     status = clSetKernelArg(kernel, argi++, sizeof(float)*buffer_size, NULL);
     checkError(status, "Failed to set argument %d", argi - 1);
 
-    status = clSetKernelArg(kernel, argi++, sizeof(int)*13, NULL);
-    checkError(status, "Failed to set argument %d", argi - 1);
-
     const size_t work_size = 1;
     status = clEnqueueTask(queue, kernel, buffer_num, write_event, &kernel_event);
     checkError(status, "Failed to launch kernel");
@@ -375,10 +367,9 @@ void run() {
     clReleaseEvent(kernel_event);
     clReleaseEvent(finish_event);
 
-    // copy free surface values.
+    //Get result for next field
     memcpy(fields[next_idx], fields[next_idx]+4*nx, nx*sizeof(float));
     memcpy(fields[next_idx]+ nx, fields[next_idx]+3*nx, nx*sizeof(float));
-    //Get result for next field
     memcpy(output+(nx-2*pad_size)*i, fields[next_idx]+receiver_depth*nx+pad_size, (nx-2*pad_size)*sizeof(float));
   }
 

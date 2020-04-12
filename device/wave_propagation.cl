@@ -10,42 +10,40 @@ __kernel void wave_propagation(const int nx,
                                const int nz,
                                const int dx,
                                const float dt,
-                              __global const float* velocity, 
-                              __global const float* density, 
-                              __global const float* abs_model, 
-                              __global const float* prev, 
-                              __global const float* curr, 
-                              __global const float* density_init, 
-                              __global const float* prev_init, 
-                              __global const float* curr_init, 
+                              __global const float *restrict velocity, 
+                              __global const float *restrict density, 
+                              __global const float *restrict abs_model, 
+                              __global const float *restrict prev, 
+                              __global const float *restrict curr, 
+                              __global const float *restrict density_init, 
+                              __global const float *restrict prev_init, 
+                              __global const float *restrict curr_init, 
                               __global float* restrict next,
-                              __local float* density_buff,
-                              __local float* prev_buff,
-                              __local float* curr_buff,
-                              __local int* indices) 
+                              __local float *restrict density_buff,
+                              __local float *restrict prev_buff,
+                              __local float *restrict curr_buff) 
 {
-    // The size of continuous data needed for calculate each new value
     int buffer_size = 6*nx+1;
-
-    // The number of values/positions needed for new value calculation
-    int num_positions = 13;
 
     // (i-3), j: 0; (i-2), j: 1; (i-1), j: 2; i, j: 3; (i+1), j: 4;
     // (i+2), j: 5; (i+3), j: 6;  i, j-3: 7; i, j-2: 8; i, j-1: 9;
     // i, j+1: 10; i, j+2: 11;  i, j+3: 12
-
     //set the ones on the vertical direction
+    int offsets[13];
     for (int i = 0; i < 7; ++i) {
-        indices[i] = i * nx;
+        offsets[i] = i * nx;
     }
 
     //set the ones on the horizontal direction
     for (int i = 7; i < 10; ++i) {
-        indices[i] = 3 * nx - 10 + i;
+        offsets[i] = 3 * nx - 10 + i;
     }
-    for (int i = 10; i < num_positions; ++i) {
-        indices[i] = 3*nx - 9 + i;
+
+    for (int i = 10; i < 13; ++i) {
+        offsets[i] = 3*nx - 9 + i;
     }
+
+    int start_pos = 0;
 
     // fill with initial values
     for (int i = 0; i < buffer_size-1; ++i) {
@@ -56,15 +54,15 @@ __kernel void wave_propagation(const int nx,
 
     float dtdx2 = pow(dt, 2)/pow(dx, 2);
     int total_size = nx * (nz-6);
-
     for (int cell = 0; cell < total_size; ++cell)
     {
-        //Get next value and update value position/indices.
-        density_buff[indices[0]] = density[cell];
-        prev_buff[indices[0]] = prev[cell];
-        curr_buff[indices[0]] = curr[cell];
-        for (int i = 0; i <  num_positions; ++i) {
-            indices[i] = (indices[i] + 1) % buffer_size;
+        density_buff[start_pos] = density[cell];
+        prev_buff[start_pos] = prev[cell];
+        curr_buff[start_pos] = curr[cell];
+        start_pos = (start_pos + 1) % buffer_size;
+        int indices[13];
+        for (int i = 0; i <  13; ++i) {
+            indices[i] = (offsets[i] + start_pos) % buffer_size;
         }
 
         // calculate d2u/dx2 using 6th order accuracy
