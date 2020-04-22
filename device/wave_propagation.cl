@@ -43,7 +43,6 @@ __kernel void wave_propagation(const int nx,
         offsets[i] = 3*nx - 9 + i;
     }
 
-    int start_pos = 0;
 
     // fill with initial values
     for (int i = 0; i < buffer_size-1; ++i) {
@@ -56,13 +55,12 @@ __kernel void wave_propagation(const int nx,
     int total_size = nx * (nz-6);
     for (int cell = 0; cell < total_size; ++cell)
     {
-        density_buff[start_pos] = density[cell];
-        prev_buff[start_pos] = prev[cell];
-        curr_buff[start_pos] = curr[cell];
-        start_pos = (start_pos + 1) % buffer_size;
+        density_buff[cell % buffer_size] = density[cell];
+        prev_buff[cell % buffer_size] = prev[cell];
+        curr_buff[cell % buffer_size] = curr[cell];
         int indices[13];
         for (int i = 0; i <  13; ++i) {
-            indices[i] = (offsets[i] + start_pos) % buffer_size;
+            indices[i] = (offsets[i] + cell+1) % buffer_size;
         }
 
         // calculate d2u/dx2 using 6th order accuracy

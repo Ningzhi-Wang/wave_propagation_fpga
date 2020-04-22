@@ -41,15 +41,15 @@ int abs_layer_coefficient = 5;
 int pad_size = ceil(dx * abs_layer_coefficient);
 int nx = 501 + 2*pad_size;
 int nz = 351 + pad_size + 3;
-int receiver_depth = 3;
+int receiver_depth = 73;
 int sx = 150 + pad_size;
-int sz = 3;
+int sz = 83;
  
 float frequency = 10.0;
 float total_time = 2.0;
 float source_amplitude = 1.0;
 float courant_number = 0.3;
-float abs_fact = 0.2;
+float abs_fact = 0.4;
 float dt = courant_number * dx / 3500.0;
 int time_steps = floor(total_time / dt);
 
@@ -247,9 +247,10 @@ void run() {
   int next_idx = 2;
 
   const double start_time = getCurrentTimestamp();
-  printf("number of time steps: %d\n", time_steps);
 
   // Launch the problem for each device.
+  FILE *log;
+  log = fopen("./out.log", "w");
 
   for(unsigned i = 0; i < time_steps; ++i) {
 
@@ -262,7 +263,7 @@ void run() {
     int temp_idx = prev_idx;
     prev_idx = curr_idx;
     curr_idx = next_idx;
-    next_idx = prev_idx;
+    next_idx = temp_idx;
 
     fields[curr_idx][sz*nx+sx] = fabs(src[i]) < 0.0000001?fields[curr_idx][sz*nx+sx]:src[i];
 
@@ -363,6 +364,7 @@ void run() {
       clReleaseEvent(write_event[event_number]);
     }
 
+    // Wait for all devices to finish.
     clWaitForEvents(num_devices, &finish_event);
     clReleaseEvent(kernel_event);
     clReleaseEvent(finish_event);
@@ -373,16 +375,14 @@ void run() {
     memcpy(output+(nx-2*pad_size)*i, fields[next_idx]+receiver_depth*nx+pad_size, (nx-2*pad_size)*sizeof(float));
   }
 
-  // Wait for all devices to finish.
-
   const double end_time = getCurrentTimestamp();
+  fprintf(log, "Total time usage: %0.3f\n", (end_time-start_time) * 1e3);
+  fclose(log);
 
-  // Wall-clock time taken.
-  printf("\nTime: %0.3f ms\n", (end_time - start_time) * 1e3);
   FILE* fout;
   fout = fopen("result.csv", "wb");
   fwrite(output, sizeof(float), (nx-2*pad_size)*time_steps, fout);
-  printf("write finish\n");
+  fclose(fout);
 }
 
 // Free the resources allocated during initialization
