@@ -1,91 +1,69 @@
-typedef struct wave_model_2d
-{
-    int nx;
-    int nz;
-    int dx;
-    float dt;
-} WAVE_MODLE_2D;
-
 __kernel void wave_propagation(const int nx, 
                                const int nz,
                                const int dx,
                                const float dt,
-                              __global const float *restrict velocity, 
-                              __global const float *restrict density, 
-                              __global const float *restrict abs_model, 
-                              __global const float *restrict prev, 
-                              __global const float *restrict curr, 
-                              __global const float *restrict density_init, 
-                              __global const float *restrict prev_init, 
-                              __global const float *restrict curr_init, 
-                              __global float* restrict next,
-                              __local float *restrict density_buff,
-                              __local float *restrict prev_buff,
-                              __local float *restrict curr_buff) 
+                               __global const float *restrict velocity, 
+                               __global const float *restrict density, 
+                               __global const float *restrict abs_model, 
+                               __global const float *restrict prev, 
+                               __global const float *restrict curr, 
+                               __global float* restrict next) 
 {
-    int buffer_size = 6*nx+1;
+    float shift_denvl[7];
+    float shift_den[3];
+    float shift_curr[3];
 
-    // (i-3), j: 0; (i-2), j: 1; (i-1), j: 2; i, j: 3; (i+1), j: 4;
-    // (i+2), j: 5; (i+3), j: 6;  i, j-3: 7; i, j-2: 8; i, j-1: 9;
-    // i, j+1: 10; i, j+2: 11;  i, j+3: 12
-    //set the ones on the vertical direction
-    int offsets[13];
-    for (int i = 0; i < 7; ++i) {
-        offsets[i] = i * nx;
-    }
-
-    //set the ones on the horizontal direction
-    for (int i = 7; i < 10; ++i) {
-        offsets[i] = 3 * nx - 10 + i;
-    }
-
-    for (int i = 10; i < 13; ++i) {
-        offsets[i] = 3*nx - 9 + i;
-    }
-
-
-    // fill with initial values
-    for (int i = 0; i < buffer_size-1; ++i) {
-        density_buff[i+1] = density_init[i];
-        prev_buff[i+1] = prev_init[i];
-        curr_buff[i+1] = curr_init[i];
+    #pragma unroll
+    for (int i = 0; i < 3; ++i) {
+        shift_den[i] = density[3*nx+i]; 
+        shift_curr[i] = curr[3*nx+i]; 
+        shift_denvl[i+4] = shift_den[i] * shift_curr[i];
     }
 
     float dtdx2 = pow(dt, 2)/pow(dx, 2);
-    int total_size = nx * (nz-6);
-    for (int cell = 0; cell < total_size; ++cell)
+
+    #pragma ivdep array(next)
+    for (int cell = 0; cell < nx*(nz-6); ++ cell)
     {
-        density_buff[cell % buffer_size] = density[cell];
-        prev_buff[cell % buffer_size] = prev[cell];
-        curr_buff[cell % buffer_size] = curr[cell];
-        int indices[13];
-        for (int i = 0; i <  13; ++i) {
-            indices[i] = (offsets[i] + cell+1) % buffer_size;
+        #pragma unroll
+        for (int i = 0; i < 6; ++i) {
+            shift_denvl[i] = shift_denvl[i+1];
         }
+
+        float this_value = shift_curr[0];
+        float this_den = shift_den[0];
+        #pragma unroll
+        for (int i = 0; i < 3; ++i) {
+            shift_den[i] = shift_den[i+1];
+            shift_curr[i] = shift_curr[i+1];
+        }
+
+        shift_den[2] = density[3*nx+cell+3];
+        shift_curr[2] = curr[3*nx+cell+3];
+
+        shift_denvl[6] = shift_den[2]*shift_curr[2];
 
         // calculate d2u/dx2 using 6th order accuracy
         float result = 0;
         if (cell % nx >= 3 && cell % nx < nx-3) {
-          float d2x = 1.0/90.0*(curr_buff[indices[7]]*density_buff[indices[7]] + 
-                                curr_buff[indices[12]]*density_buff[indices[12]]) -
-                      3.0/20.0*(curr_buff[indices[8]]*density_buff[indices[8]] + 
-                                curr_buff[indices[11]]*density_buff[indices[11]]) +
-                      3.0/2.0*(curr_buff[indices[9]]*density_buff[indices[9]] + 
-                               curr_buff[indices[10]]*density_buff[indices[10]]) -
-                      49.0/18.0*curr_buff[indices[3]]*density_buff[indices[3]];
+            float d2z = 1.0/90.0*(curr[cell] * density[cell] + 
+                                  curr[cell + 6*nx] * density[cell + 6*nx]) -
+                        3.0/20.0*(curr[cell + nx] * density[cell + nx] + 
+                                  curr[cell + 5*nx] * density[cell + 5*nx]) +
+                        3.0/2.0*(curr[cell + 2*nx] * density[cell + 2*nx] + 
+                                  curr[cell + 4*nx] * density[cell + 4*nx]) -
+                        49.0/18.0*shift_denvl[3];
 
-          float d2z = 1.0/90.0*(curr_buff[indices[0]]*density_buff[indices[0]] + 
-                                curr_buff[indices[6]]*density_buff[indices[6]]) -
-                      3.0/20.0*(curr_buff[indices[1]]*density_buff[indices[1]] + 
-                                curr_buff[indices[5]]*density_buff[indices[5]]) +
-                      3.0/2.0*(curr_buff[indices[2]]*density_buff[indices[2]] + 
-                               curr_buff[indices[4]]*density_buff[indices[4]]) -
-                      49.0/18.0*curr_buff[indices[3]]*density_buff[indices[3]];
+            float d2x = 1.0/90.0*(shift_denvl[0] + shift_denvl[6]) -
+                        3.0/20.0*(shift_denvl[1] + shift_denvl[5]) +
+                        3.0/2.0*(shift_denvl[2] + shift_denvl[4]) -
+                        49.0/18.0*shift_denvl[3];
   
-          //perform update of wave pressure
-          double q = abs_model[cell];
-          result = (dtdx2*pow(velocity[cell], 2)*(d2x+d2z)/density_buff[indices[3]] +
-                   (2-pow(q, 2))*curr_buff[indices[3]]-(1-q)*prev_buff[indices[3]])/(1+q);
+            //perform update of wave pressure
+            float q = abs_model[cell];
+            float vel = velocity[cell];
+
+            result = (dtdx2*vel*vel*(d2x+d2z)/this_den + (2-q*q)*this_value-(1-q)*prev[cell])/(1+q);
         }
         next[cell] = result;
     }
