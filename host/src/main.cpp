@@ -31,6 +31,7 @@ scoped_aligned_ptr<float> output;
 
 cl_mem velocity_buff, density_buff, abs_facts_buff;
 cl_mem prev_buff, curr_buff, next_buff; 
+cl_mem prev_init, curr_init, density_init; 
 
 bool use_fast_emulator = false;
 
@@ -139,7 +140,7 @@ bool init_opencl() {
   velocity_buff = clCreateBuffer(context, CL_MEM_READ_ONLY, sizeof(float)*nx*(nz-6), NULL, &status);
   checkError(status, "Failed to create velocity buffer");
 
-  density_buff = clCreateBuffer(context, CL_MEM_READ_ONLY, sizeof(float)*nx*nz, NULL, &status);
+  density_buff = clCreateBuffer(context, CL_MEM_READ_ONLY, sizeof(float)*nx*(nz-6), NULL, &status);
   checkError(status, "Failed to create density buffer");
 
   abs_facts_buff = clCreateBuffer(context, CL_MEM_READ_ONLY, sizeof(float)*nx*(nz-6), NULL, &status);
@@ -148,11 +149,20 @@ bool init_opencl() {
   prev_buff = clCreateBuffer(context, CL_MEM_READ_ONLY, sizeof(float)*nx*(nz-6), NULL, &status);
   checkError(status, "Failed to create wavefield buffer for previous time stamp");
   
-  curr_buff = clCreateBuffer(context, CL_MEM_READ_ONLY, sizeof(float)*nx*nz, NULL, &status);
+  curr_buff = clCreateBuffer(context, CL_MEM_READ_ONLY, sizeof(float)*nx*(nz-6), NULL, &status);
   checkError(status, "Failed to create wavefield buffer for current time stamp");
 
   next_buff = clCreateBuffer(context, CL_MEM_READ_WRITE, sizeof(float)*nx*(nz-6), NULL, &status);
   checkError(status, "Failed to create wavefield buffer for next time stamp");
+
+  prev_init = clCreateBuffer(context, CL_MEM_READ_WRITE, sizeof(float)*nx*6, NULL, &status);
+  checkError(status, "Failed to create wavefield buffer for previous initial value");
+
+  curr_init = clCreateBuffer(context, CL_MEM_READ_WRITE, sizeof(float)*nx*6, NULL, &status);
+  checkError(status, "Failed to create wavefield buffer for current initial value");
+
+  density_init = clCreateBuffer(context, CL_MEM_READ_WRITE, sizeof(float)*nx*6, NULL, &status);
+  checkError(status, "Failed to create wavefield buffer for density initial value");
 
   return true;
 }
@@ -238,7 +248,7 @@ void run() {
   int next_idx = 2;
 
   FILE *log;
-  log = fopen("./output.log", "w+");
+  log = fopen("/home/miku/IC/Individual_Project/fpga/experiments/shifted_register/output.log", "w+");
 
   const double start_time = getCurrentTimestamp();
 
@@ -247,7 +257,7 @@ void run() {
     cl_event kernel_event;
     cl_event finish_event;
 
-    int buffer_num = 5;
+    int buffer_num = 8;
     cl_event write_event[buffer_num];
 
     int temp_idx = prev_idx;
@@ -267,7 +277,7 @@ void run() {
     checkError(status, "Failed to transfer absorb factors");
 
     status = clEnqueueWriteBuffer(queue, density_buff, CL_FALSE,
-        0, nx * nz * sizeof(float), density, 0, NULL, &write_event[2]);
+        0, nx * (nz-6) * sizeof(float), density+6*nx, 0, NULL, &write_event[2]);
     checkError(status, "Failed to transfer density");
 
     status = clEnqueueWriteBuffer(queue, prev_buff, CL_FALSE,
@@ -275,13 +285,22 @@ void run() {
     checkError(status, "Failed to transfer previous field");
 
     status = clEnqueueWriteBuffer(queue, curr_buff, CL_FALSE,
-        0, nx * nz * sizeof(float), fields[curr_idx], 0, NULL, &write_event[4]);
+        0, nx * (nz-6) * sizeof(float), fields[curr_idx]+6*nx, 0, NULL, &write_event[4]);
     checkError(status, "Failed to transfer current field");
 
-    unsigned argi = 0;
+    status = clEnqueueWriteBuffer(queue, prev_init, CL_FALSE,
+        0, nx * 6 * sizeof(float), fields[prev_idx], 0, NULL, &write_event[5]);
+    checkError(status, "Failed to transfer previouse initial value");
 
-    status = clSetKernelArg(kernel, argi++, sizeof(cl_int), &nx);
-    checkError(status, "Failed to set argument %d", argi - 1);
+    status = clEnqueueWriteBuffer(queue, curr_init, CL_FALSE,
+        0, nx * 6 * sizeof(float), fields[curr_idx], 0, NULL, &write_event[6]);
+    checkError(status, "Failed to transfer current initial value");
+
+    status = clEnqueueWriteBuffer(queue, density_init, CL_FALSE,
+        0, nx * 6 * sizeof(float), density, 0, NULL, &write_event[7]);
+    checkError(status, "Failed to transfer density initial value");
+
+    unsigned argi = 0;
 
     status = clSetKernelArg(kernel, argi++, sizeof(cl_int), &nz);
     checkError(status, "Failed to set argument %d", argi - 1);
@@ -305,6 +324,15 @@ void run() {
     checkError(status, "Failed to set argument %d", argi - 1);
 
     status = clSetKernelArg(kernel, argi++, sizeof(cl_mem), &curr_buff);
+    checkError(status, "Failed to set argument %d", argi - 1);
+
+    status = clSetKernelArg(kernel, argi++, sizeof(cl_mem), &density_init);
+    checkError(status, "Failed to set argument %d", argi - 1);
+
+    status = clSetKernelArg(kernel, argi++, sizeof(cl_mem), &prev_init);
+    checkError(status, "Failed to set argument %d", argi - 1);
+
+    status = clSetKernelArg(kernel, argi++, sizeof(cl_mem), &curr_init);
     checkError(status, "Failed to set argument %d", argi - 1);
 
     status = clSetKernelArg(kernel, argi++, sizeof(cl_mem), &next_buff);
@@ -351,7 +379,7 @@ void run() {
   fclose(log);
 
   FILE* fout;
-  fout = fopen("result.csv", "wb");
+  fout = fopen("/home/miku/IC/Individual_Project/fpga/experiments/shifted_register/fpga.csv", "wb");
   fwrite(output, sizeof(float), (nx-2*pad_size)*time_steps, fout);
   fclose(fout);
 }
