@@ -330,7 +330,6 @@ void run() {
     memcpy(fields[next_idx], fields[next_idx]+4*nx, nx*sizeof(float));
     memcpy(fields[next_idx]+ nx, fields[next_idx]+3*nx, nx*sizeof(float));
     memcpy(output+(nx-2*pad_size)*i, fields[next_idx]+receiver_depth*nx+pad_size, (nx-2*pad_size)*sizeof(float));
-    printf("iteration %d, output: %0.3f\n", i, output[(nx-2*pad_size)*i+150]);
   }
   const double end_time = getCurrentTimestamp();
   fprintf(log, "Total time usage: %0.3f\n", (end_time-start_time));
