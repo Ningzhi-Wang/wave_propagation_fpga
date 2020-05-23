@@ -241,7 +241,7 @@ void run() {
   int next_idx = 2;
 
   FILE *log;
-  log = fopen("/home/miku/IC/Individual_Project/fpga/experiments/multi_grid/output.log", "w+");
+  log = fopen("./output.log", "w+");
 
   const double start_time = getCurrentTimestamp();
 
@@ -350,7 +350,7 @@ void run() {
   fclose(log);
 
   FILE* fout;
-  fout = fopen("/home/miku/IC/Individual_Project/wave_propagation/fpga.csv", "w");
+  fout = fopen("./fpga.csv", "w");
   fwrite(output, sizeof(float), (nx-2*pad_size)*time_steps, fout);
   fclose(fout);
 }
