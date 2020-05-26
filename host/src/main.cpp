@@ -31,7 +31,6 @@ scoped_aligned_ptr<float> output;
 
 cl_mem velocity_buff, density_buff, abs_facts_buff;
 cl_mem prev_buff, curr_buff, next_buff; 
-cl_mem prev_init, curr_init, density_init; 
 
 bool use_fast_emulator = false;
 
@@ -128,7 +127,7 @@ bool init_opencl() {
 
   // Create per-device objects.
     // Command queue.
-  queue = clCreateCommandQueue(context, device, CL_QUEUE_PROFILING_ENABLE, &status);
+  queue = clCreateCommandQueue(context, device, 0, &status);
   checkError(status, "Failed to create command queue");
 
   // Kernel.
@@ -136,33 +135,28 @@ bool init_opencl() {
   kernel = clCreateKernel(program, kernel_name, &status);
   checkError(status, "Failed to create kernel");
 
+  int offset = 6*nx%16;
+  int buffer_size = sizeof(float) * (nx*(nz-6)+offset);
 
-  velocity_buff = clCreateBuffer(context, CL_MEM_READ_ONLY, sizeof(float)*nx*(nz-6), NULL, &status);
+
+  velocity_buff = clCreateBuffer(context, CL_MEM_READ_ONLY, buffer_size, NULL, &status);
   checkError(status, "Failed to create velocity buffer");
 
-  density_buff = clCreateBuffer(context, CL_MEM_READ_ONLY, sizeof(float)*nx*(nz-6), NULL, &status);
+  density_buff = clCreateBuffer(context, CL_MEM_READ_ONLY, sizeof(float)*nx*nz, NULL, &status);
   checkError(status, "Failed to create density buffer");
 
-  abs_facts_buff = clCreateBuffer(context, CL_MEM_READ_ONLY, sizeof(float)*nx*(nz-6), NULL, &status);
+  abs_facts_buff = clCreateBuffer(context, CL_MEM_READ_ONLY, buffer_size, NULL, &status);
   checkError(status, "Failed to create absorb factors buffer");
 
-  prev_buff = clCreateBuffer(context, CL_MEM_READ_ONLY, sizeof(float)*nx*(nz-6), NULL, &status);
+  prev_buff = clCreateBuffer(context, CL_MEM_READ_ONLY, buffer_size, NULL, &status);
   checkError(status, "Failed to create wavefield buffer for previous time stamp");
   
-  curr_buff = clCreateBuffer(context, CL_MEM_READ_ONLY, sizeof(float)*nx*(nz-6), NULL, &status);
+  curr_buff = clCreateBuffer(context, CL_MEM_READ_ONLY, sizeof(float)*nx*nz, NULL, &status);
   checkError(status, "Failed to create wavefield buffer for current time stamp");
 
-  next_buff = clCreateBuffer(context, CL_MEM_READ_WRITE, sizeof(float)*nx*(nz-6), NULL, &status);
+  next_buff = clCreateBuffer(context, CL_MEM_READ_WRITE, buffer_size, NULL, &status);
   checkError(status, "Failed to create wavefield buffer for next time stamp");
 
-  prev_init = clCreateBuffer(context, CL_MEM_READ_WRITE, sizeof(float)*nx*6, NULL, &status);
-  checkError(status, "Failed to create wavefield buffer for previous initial value");
-
-  curr_init = clCreateBuffer(context, CL_MEM_READ_WRITE, sizeof(float)*nx*6, NULL, &status);
-  checkError(status, "Failed to create wavefield buffer for current initial value");
-
-  density_init = clCreateBuffer(context, CL_MEM_READ_WRITE, sizeof(float)*nx*6, NULL, &status);
-  checkError(status, "Failed to create wavefield buffer for density initial value");
 
   return true;
 }
@@ -246,19 +240,41 @@ void run() {
   int curr_idx = 1;
   int next_idx = 2;
 
+  FILE *log;
+  log = fopen("./output.log", "w");
+
   const double start_time = getCurrentTimestamp();
 
-  // Launch the problem for each device.
-  FILE *log;
-  log = fopen("./out.log", "w");
+  int num_const_buffer = 3;
+  cl_event const_events[num_const_buffer];
+
+  int offset = 6*nx%16;
+  int buffer_size = sizeof(float) * (nx*(nz-6)+offset);
+
+  status = clEnqueueWriteBuffer(queue, velocity_buff, CL_FALSE,
+      0, buffer_size, velocity+3*nx-offset, 0, NULL, &const_events[0]);
+  checkError(status, "Failed to transfer velocity");
+
+  status = clEnqueueWriteBuffer(queue, abs_facts_buff, CL_FALSE,
+      0, buffer_size, abs_facts+3*nx-offset, 0, NULL, &const_events[1]);
+  checkError(status, "Failed to transfer absorb factors");
+
+  status = clEnqueueWriteBuffer(queue, density_buff, CL_FALSE,
+      0, nx * nz * sizeof(float), density, 0, NULL, &const_events[2]);
+  checkError(status, "Failed to transfer density");
+
+  clWaitForEvents(num_devices, const_events);
+
+  for (int i = 0; i < num_const_buffer; ++i) {
+    clReleaseEvent(const_events[i]);
+  }
 
   for(unsigned i = 0; i < time_steps; ++i) {
 
+    int buffer_num = 2;
+    cl_event write_event[buffer_num];
     cl_event kernel_event;
     cl_event finish_event;
-
-    int buffer_num = 8;
-    cl_event write_event[buffer_num];
 
     int temp_idx = prev_idx;
     prev_idx = curr_idx;
@@ -267,43 +283,16 @@ void run() {
 
     fields[curr_idx][sz*nx+sx] = fabs(src[i]) < 0.0000001?fields[curr_idx][sz*nx+sx]:src[i];
 
-
-    status = clEnqueueWriteBuffer(queue, velocity_buff, CL_FALSE,
-        0, nx * (nz-6) * sizeof(float), velocity+3*nx, 0, NULL, &write_event[0]);
-    checkError(status, "Failed to transfer velocity");
-
-    status = clEnqueueWriteBuffer(queue, abs_facts_buff, CL_FALSE,
-        0, nx * (nz-6) * sizeof(float), abs_facts+3*nx, 0, NULL, &write_event[1]);
-    checkError(status, "Failed to transfer absorb factors");
-
-    status = clEnqueueWriteBuffer(queue, density_buff, CL_FALSE,
-        0, nx * (nz-6) * sizeof(float), density+6*nx, 0, NULL, &write_event[2]);
-    checkError(status, "Failed to transfer density");
-
     status = clEnqueueWriteBuffer(queue, prev_buff, CL_FALSE,
-        0, nx * (nz-6) * sizeof(float), fields[prev_idx]+6*nx, 0, NULL, &write_event[3]);
+        0, buffer_size, fields[prev_idx]+3*nx-offset, 0, NULL, &write_event[0]);
     checkError(status, "Failed to transfer previous field");
 
     status = clEnqueueWriteBuffer(queue, curr_buff, CL_FALSE,
-        0, nx * (nz-6) * sizeof(float), fields[curr_idx]+6*nx, 0, NULL, &write_event[4]);
+        0, nx * nz * sizeof(float), fields[curr_idx], 0, NULL, &write_event[1]);
     checkError(status, "Failed to transfer current field");
 
-    status = clEnqueueWriteBuffer(queue, prev_init, CL_FALSE,
-        0, nx * 6 * sizeof(float), fields[prev_idx], 0, NULL, &write_event[5]);
-    checkError(status, "Failed to transfer previouse initial value");
-
-    status = clEnqueueWriteBuffer(queue, curr_init, CL_FALSE,
-        0, nx * 6 * sizeof(float), fields[curr_idx], 0, NULL, &write_event[6]);
-    checkError(status, "Failed to transfer current initial value");
-
-    status = clEnqueueWriteBuffer(queue, density_init, CL_FALSE,
-        0, nx * 6 * sizeof(float), density, 0, NULL, &write_event[7]);
-    checkError(status, "Failed to transfer density initial value");
 
     unsigned argi = 0;
-
-    status = clSetKernelArg(kernel, argi++, sizeof(cl_int), &nx);
-    checkError(status, "Failed to set argument %d", argi - 1);
 
     status = clSetKernelArg(kernel, argi++, sizeof(cl_int), &nz);
     checkError(status, "Failed to set argument %d", argi - 1);
@@ -329,42 +318,23 @@ void run() {
     status = clSetKernelArg(kernel, argi++, sizeof(cl_mem), &curr_buff);
     checkError(status, "Failed to set argument %d", argi - 1);
 
-    status = clSetKernelArg(kernel, argi++, sizeof(cl_mem), &density_init);
-    checkError(status, "Failed to set argument %d", argi - 1);
-
-    status = clSetKernelArg(kernel, argi++, sizeof(cl_mem), &prev_init);
-    checkError(status, "Failed to set argument %d", argi - 1);
-
-    status = clSetKernelArg(kernel, argi++, sizeof(cl_mem), &curr_init);
-    checkError(status, "Failed to set argument %d", argi - 1);
-
     status = clSetKernelArg(kernel, argi++, sizeof(cl_mem), &next_buff);
     checkError(status, "Failed to set argument %d", argi - 1);
 
-    int buffer_size = 6*nx+1;
-    status = clSetKernelArg(kernel, argi++, sizeof(float)*buffer_size, NULL);
-    checkError(status, "Failed to set argument %d", argi - 1);
-
-    status = clSetKernelArg(kernel, argi++, sizeof(float)*buffer_size, NULL);
-    checkError(status, "Failed to set argument %d", argi - 1);
-
-    status = clSetKernelArg(kernel, argi++, sizeof(float)*buffer_size, NULL);
-    checkError(status, "Failed to set argument %d", argi - 1);
-
-    const size_t work_size = 1;
     status = clEnqueueTask(queue, kernel, buffer_num, write_event, &kernel_event);
     checkError(status, "Failed to launch kernel");
 
     //Read the result. This the final operation.
     status = clEnqueueReadBuffer(queue, next_buff, CL_FALSE,
-          0,  nx*(nz-6)*sizeof(cl_float), fields[next_idx]+3*nx, 1, &kernel_event, &finish_event);
-
-    // Release local events.
+          0,  buffer_size, fields[next_idx]+3*nx-offset, 1, &kernel_event, &finish_event);
+    
+   // Release local events.
     for (int event_number = 0; event_number < buffer_num; ++event_number) {
       clReleaseEvent(write_event[event_number]);
     }
 
     // Wait for all devices to finish.
+ 
     clWaitForEvents(num_devices, &finish_event);
     clReleaseEvent(kernel_event);
     clReleaseEvent(finish_event);
@@ -374,13 +344,12 @@ void run() {
     memcpy(fields[next_idx]+ nx, fields[next_idx]+3*nx, nx*sizeof(float));
     memcpy(output+(nx-2*pad_size)*i, fields[next_idx]+receiver_depth*nx+pad_size, (nx-2*pad_size)*sizeof(float));
   }
-
   const double end_time = getCurrentTimestamp();
-  fprintf(log, "Total time usage: %0.3f\n", (end_time-start_time) * 1e3);
+  fprintf(log, "Total time usage: %0.3f\n", (end_time-start_time));
   fclose(log);
 
   FILE* fout;
-  fout = fopen("result.csv", "wb");
+  fout = fopen("./fpga.csv", "w");
   fwrite(output, sizeof(float), (nx-2*pad_size)*time_steps, fout);
   fclose(fout);
 }

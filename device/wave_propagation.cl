@@ -1,92 +1,96 @@
-typedef struct wave_model_2d
-{
-    int nx;
-    int nz;
-    int dx;
-    float dt;
-} WAVE_MODLE_2D;
+#define nx 571
+#define VECTOR_SIZE 16
+#define BUFFER_SIZE 6*nx+VECTOR_SIZE
 
-__kernel void wave_propagation(const int nx, 
-                               const int nz,
+#define GET_VALUE(dtdx2, vel, q, den, curr, prev, tv, td, nx, idx)  \
+    ((union ufloat) {.f = (dtdx2*vel*vel*( \
+        1.0f/90.0f*(curr[idx-3*nx] * den[idx-3*nx] + \
+                  curr[idx+3*nx] * den[idx+3*nx]) - \
+        3.0f/20.0f*(curr[idx-2*nx] * den[idx-2*nx] + \
+                  curr[idx+2*nx] * den[idx+2*nx]) + \
+        3.0f/2.0f*(curr[idx-nx] * den[idx-nx] + \
+                  curr[idx+nx] * den[idx+nx]) - \
+        49.0f/18.0f*td*tv +\
+        1.0f/90.0f*(curr[idx-3]*den[idx-3] + \
+                  curr[idx+3]*den[idx+3]) - \
+        3.0f/20.0f*(curr[idx-2]*den[idx-2] + \
+                  curr[idx+2]*den[idx+2]) + \
+        3.0f/2.0f*(curr[idx-1]*den[idx-1] + \
+                 curr[idx+1]*den[idx+1]) - \
+        49.0f/18.0f*td*tv \
+   )/td+ (2-q*q)*tv-(1-q)*prev)/(1+q)}).u 
+
+
+union ufloat {
+    float f;
+    unsigned u;
+};
+
+__kernel void wave_propagation(const int nz,
                                const int dx,
                                const float dt,
-                              __global const float *restrict velocity, 
-                              __global const float *restrict density, 
-                              __global const float *restrict abs_model, 
-                              __global const float *restrict prev, 
-                              __global const float *restrict curr, 
-                              __global const float *restrict density_init, 
-                              __global const float *restrict prev_init, 
-                              __global const float *restrict curr_init, 
-                              __global float* restrict next,
-                              __local float *restrict density_buff,
-                              __local float *restrict prev_buff,
-                              __local float *restrict curr_buff) 
+                               __global const float16 *restrict velocity, 
+                               __global const float16 *restrict density, 
+                               __global const float16 *restrict abs_model, 
+                               __global const float16 *restrict prev, 
+                               __global const float16 *restrict curr, 
+                               __global float16* restrict next) 
 {
-    int buffer_size = 6*nx+1;
-
-    // (i-3), j: 0; (i-2), j: 1; (i-1), j: 2; i, j: 3; (i+1), j: 4;
-    // (i+2), j: 5; (i+3), j: 6;  i, j-3: 7; i, j-2: 8; i, j-1: 9;
-    // i, j+1: 10; i, j+2: 11;  i, j+3: 12
-    //set the ones on the vertical direction
-    int offsets[13];
-    for (int i = 0; i < 7; ++i) {
-        offsets[i] = i * nx;
-    }
-
-    //set the ones on the horizontal direction
-    for (int i = 7; i < 10; ++i) {
-        offsets[i] = 3 * nx - 10 + i;
-    }
-
-    for (int i = 10; i < 13; ++i) {
-        offsets[i] = 3*nx - 9 + i;
-    }
-
-
-    // fill with initial values
-    for (int i = 0; i < buffer_size-1; ++i) {
-        density_buff[i+1] = density_init[i];
-        prev_buff[i+1] = prev_init[i];
-        curr_buff[i+1] = curr_init[i];
-    }
+    float curr_buff[BUFFER_SIZE];
+    float den_buff[BUFFER_SIZE];
+    float den_remains[VECTOR_SIZE];
+    float curr_remains[VECTOR_SIZE];
+    int remainder = VECTOR_SIZE - 6*nx%VECTOR_SIZE;
 
     float dtdx2 = pow(dt, 2)/pow(dx, 2);
-    int total_size = nx * (nz-6);
-    for (int cell = 0; cell < total_size; ++cell)
+    int total_size = ceil(nx*nz/VECTOR_SIZE);
+    int offset = 6*nx/VECTOR_SIZE;
+
+    for (int cell = 0; cell < total_size; cell++)
     {
-        density_buff[cell % buffer_size] = density[cell];
-        prev_buff[cell % buffer_size] = prev[cell];
-        curr_buff[cell % buffer_size] = curr[cell];
-        int indices[13];
-        for (int i = 0; i <  13; ++i) {
-            indices[i] = (offsets[i] + cell+1) % buffer_size;
+        int num_remains = remainder & (cell >= offset);
+
+        #pragma unroll
+        for (int i = 0; i < BUFFER_SIZE-VECTOR_SIZE; ++i) {
+            curr_buff[i] = curr_buff[i+VECTOR_SIZE];
+            den_buff[i] = den_buff[i+VECTOR_SIZE];
         }
 
-        // calculate d2u/dx2 using 6th order accuracy
-        float result = 0;
-        if (cell % nx >= 3 && cell % nx < nx-3) {
-          float d2x = 1.0/90.0*(curr_buff[indices[7]]*density_buff[indices[7]] + 
-                                curr_buff[indices[12]]*density_buff[indices[12]]) -
-                      3.0/20.0*(curr_buff[indices[8]]*density_buff[indices[8]] + 
-                                curr_buff[indices[11]]*density_buff[indices[11]]) +
-                      3.0/2.0*(curr_buff[indices[9]]*density_buff[indices[9]] + 
-                               curr_buff[indices[10]]*density_buff[indices[10]]) -
-                      49.0/18.0*curr_buff[indices[3]]*density_buff[indices[3]];
+        float16 tmp_den = density[cell];
+        float16 tmp_curr = curr[cell];
 
-          float d2z = 1.0/90.0*(curr_buff[indices[0]]*density_buff[indices[0]] + 
-                                curr_buff[indices[6]]*density_buff[indices[6]]) -
-                      3.0/20.0*(curr_buff[indices[1]]*density_buff[indices[1]] + 
-                                curr_buff[indices[5]]*density_buff[indices[5]]) +
-                      3.0/2.0*(curr_buff[indices[2]]*density_buff[indices[2]] + 
-                               curr_buff[indices[4]]*density_buff[indices[4]]) -
-                      49.0/18.0*curr_buff[indices[3]]*density_buff[indices[3]];
-  
-          //perform update of wave pressure
-          double q = abs_model[cell];
-          result = (dtdx2*pow(velocity[cell], 2)*(d2x+d2z)/density_buff[indices[3]] +
-                   (2-pow(q, 2))*curr_buff[indices[3]]-(1-q)*prev_buff[indices[3]])/(1+q);
+        
+        #pragma unroll
+        for (int i = 0; i < num_remains; ++i) {
+            curr_buff[6*nx+i] = curr_remains[i];
+            den_buff[6*nx+i] = den_remains[i];
+            curr_remains[i] = tmp_curr[i+VECTOR_SIZE-num_remains];
+            den_remains[i] = tmp_den[i+VECTOR_SIZE-num_remains];
         }
-        next[cell] = result;
+
+        #pragma unroll
+        for (int i = num_remains; i < VECTOR_SIZE; ++i) {
+            curr_buff[6*nx+i] = tmp_curr[i-num_remains];
+            den_buff[6*nx+i] = tmp_den[i-num_remains];
+        }
+
+        if (cell < offset)  
+            continue;
+
+        const float16 vels = velocity[cell-offset];
+        const float16 prevs = prev[cell-offset];
+        const float16 abses = abs_model[cell-offset];
+
+        float16 results;
+        #pragma unroll
+        for (int i = 0; i < VECTOR_SIZE; ++i) {
+            // calculate d2u/dx2 using 6th order accuracy
+            int mask = ~ ((cell*VECTOR_SIZE+i)% nx < 3 || (cell*VECTOR_SIZE+i) % nx >= nx-3);
+
+            unsigned result_u = mask & GET_VALUE(dtdx2, vels[i], abses[i], den_buff, 
+                curr_buff, prevs[i], curr_buff[3*nx+i], den_buff[3*nx+i], nx, 3*nx+i);
+            results[i] = *(float*) &result_u;
+        }
+        next[cell-offset] = results;
     }
 }
