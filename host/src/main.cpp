@@ -31,6 +31,7 @@ scoped_aligned_ptr<float> output;
 
 cl_mem velocity_buff, density_buff, abs_facts_buff;
 cl_mem prev_buff, curr_buff, next_buff; 
+cl_mem output_buff, source_buff;
 
 bool use_fast_emulator = false;
 
@@ -136,25 +137,30 @@ bool init_opencl() {
   checkError(status, "Failed to create kernel");
 
 
-  velocity_buff = clCreateBuffer(context, CL_MEM_READ_ONLY, sizeof(float)*nx*(nz-6), NULL, &status);
+  velocity_buff = clCreateBuffer(context, CL_MEM_READ_ONLY, sizeof(float)*nx*(nz-3), NULL, &status);
   checkError(status, "Failed to create velocity buffer");
 
   density_buff = clCreateBuffer(context, CL_MEM_READ_ONLY, sizeof(float)*nx*nz, NULL, &status);
   checkError(status, "Failed to create density buffer");
 
-  abs_facts_buff = clCreateBuffer(context, CL_MEM_READ_ONLY, sizeof(float)*nx*(nz-6), NULL, &status);
+  abs_facts_buff = clCreateBuffer(context, CL_MEM_READ_ONLY, sizeof(float)*nx*(nz-3), NULL, &status);
   checkError(status, "Failed to create absorb factors buffer");
 
-  prev_buff = clCreateBuffer(context, CL_MEM_READ_ONLY, sizeof(float)*nx*(nz-6), NULL, &status);
+  prev_buff = clCreateBuffer(context, CL_MEM_READ_ONLY, sizeof(float)*nx*nz, NULL, &status);
   checkError(status, "Failed to create wavefield buffer for previous time stamp");
   
   curr_buff = clCreateBuffer(context, CL_MEM_READ_ONLY, sizeof(float)*nx*nz, NULL, &status);
   checkError(status, "Failed to create wavefield buffer for current time stamp");
 
-  next_buff = clCreateBuffer(context, CL_MEM_READ_WRITE, sizeof(float)*nx*(nz-6), NULL, &status);
+  next_buff = clCreateBuffer(context, CL_MEM_READ_WRITE, sizeof(float)*nx*nz, NULL, &status);
   checkError(status, "Failed to create wavefield buffer for next time stamp");
 
 
+  output_buff = clCreateBuffer(context, CL_MEM_READ_WRITE, sizeof(float)*nx*time_steps, NULL, &status);
+  checkError(status, "Failed to create output buffer");
+
+  source_buff = clCreateBuffer(context, CL_MEM_READ_WRITE, sizeof(float)*time_steps, NULL, &status);
+  checkError(status, "Failed to create output buffer");
   return true;
 }
 
@@ -163,7 +169,7 @@ void init_problem() {
   if(num_devices == 0) {
     checkError(-1, "No devices");
   }
-  output.reset(time_steps * (nx - 2*pad_size));
+  output.reset(time_steps * nx);
 
   velocity.reset(nx * nz);
   density.reset(nx * nz);
@@ -242,103 +248,112 @@ void run() {
 
   const double start_time = getCurrentTimestamp();
 
-  for(unsigned i = 0; i < time_steps; ++i) {
+  int buffer_num = 7;
+  cl_event write_event[buffer_num];
+  float zero_pattern = 0;
 
-    cl_event kernel_event;
-    cl_event finish_event;
+  status = clEnqueueWriteBuffer(queue, velocity_buff, CL_FALSE,
+      0, nx*(nz-3)*sizeof(float), velocity, 0, NULL, &write_event[0]);
+  checkError(status, "Failed to transfer velocity");
 
-    int buffer_num = 5;
-    cl_event write_event[buffer_num];
+  status = clEnqueueWriteBuffer(queue, abs_facts_buff, CL_FALSE,
+      0, nx*(nz-3)*sizeof(float), abs_facts, 0, NULL, &write_event[1]);
+  checkError(status, "Failed to transfer absorb factors");
 
-    int temp_idx = prev_idx;
-    prev_idx = curr_idx;
-    curr_idx = next_idx;
-    next_idx = temp_idx;
+  status = clEnqueueWriteBuffer(queue, density_buff, CL_FALSE,
+      0, nx*nz*sizeof(float), density, 0, NULL, &write_event[2]);
+  checkError(status, "Failed to transfer density");
 
-    fields[curr_idx][sz*nx+sx] = fabs(src[i]) < 0.0000001?fields[curr_idx][sz*nx+sx]:src[i];
+  status = clEnqueueFillBuffer(queue, prev_buff, &zero_pattern,
+      sizeof(float), 0, nz*nx*sizeof(float), 0, NULL, &write_event[3]);
+  checkError(status, "Failed to initial previous field");
 
+  status = clEnqueueFillBuffer(queue, curr_buff, &zero_pattern,
+      sizeof(float), 0, nz*nx*sizeof(float), 0, NULL, &write_event[4]);
+  checkError(status, "Failed to initial current field");
 
-    status = clEnqueueWriteBuffer(queue, velocity_buff, CL_FALSE,
-        0, nx * (nz-6) * sizeof(float), velocity+3*nx, 0, NULL, &write_event[0]);
-    checkError(status, "Failed to transfer velocity");
+  status = clEnqueueFillBuffer(queue, next_buff, &zero_pattern,
+      sizeof(float), 0, nz*nx*sizeof(float), 0, NULL, &write_event[5]);
+  checkError(status, "Failed to initial next field");
 
-    status = clEnqueueWriteBuffer(queue, abs_facts_buff, CL_FALSE,
-        0, nx * (nz-6) * sizeof(float), abs_facts+3*nx, 0, NULL, &write_event[1]);
-    checkError(status, "Failed to transfer absorb factors");
+  status = clEnqueueWriteBuffer(queue, source_buff, CL_FALSE,
+      0, time_steps*sizeof(float), src, 0, NULL, &write_event[6]);
+  checkError(status, "Failed to transfer source");
 
-    status = clEnqueueWriteBuffer(queue, density_buff, CL_FALSE,
-        0, nx * nz * sizeof(float), density, 0, NULL, &write_event[2]);
-    checkError(status, "Failed to transfer density");
-
-    status = clEnqueueWriteBuffer(queue, prev_buff, CL_FALSE,
-        0, nx * (nz-6) * sizeof(float), fields[prev_idx]+3*nx, 0, NULL, &write_event[3]);
-    checkError(status, "Failed to transfer previous field");
-
-    status = clEnqueueWriteBuffer(queue, curr_buff, CL_FALSE,
-        0, nx * nz * sizeof(float), fields[curr_idx], 0, NULL, &write_event[4]);
-    checkError(status, "Failed to transfer current field");
+  cl_event kernel_event;
+  cl_event finish_event;
 
 
-    unsigned argi = 0;
+  unsigned argi = 0;
 
-    status = clSetKernelArg(kernel, argi++, sizeof(cl_int), &nz);
-    checkError(status, "Failed to set argument %d", argi - 1);
+  status = clSetKernelArg(kernel, argi++, sizeof(cl_int), &nz);
+  checkError(status, "Failed to set argument %d", argi - 1);
 
-    status = clSetKernelArg(kernel, argi++, sizeof(cl_int), &dx);
-    checkError(status, "Failed to set argument %d", argi - 1);
+  status = clSetKernelArg(kernel, argi++, sizeof(cl_int), &dx);
+  checkError(status, "Failed to set argument %d", argi - 1);
 
-    status = clSetKernelArg(kernel, argi++, sizeof(cl_float), &dt);
-    checkError(status, "Failed to set argument %d", argi - 1);
+  int source_loc = sx+sz*nx;
+  status = clSetKernelArg(kernel, argi++, sizeof(cl_int), &source_loc);
+  checkError(status, "Failed to set argument %d", argi - 1);
 
-    status = clSetKernelArg(kernel, argi++, sizeof(cl_mem), &velocity_buff);
-    checkError(status, "Failed to set argument %d", argi - 1);
+  status = clSetKernelArg(kernel, argi++, sizeof(cl_int), &receiver_depth);
+  checkError(status, "Failed to set argument %d", argi - 1);
 
-    status = clSetKernelArg(kernel, argi++, sizeof(cl_mem), &density_buff);
-    checkError(status, "Failed to set argument %d", argi - 1);
+  status = clSetKernelArg(kernel, argi++, sizeof(cl_int), &time_steps);
+  checkError(status, "Failed to set argument %d", argi - 1);
 
-    status = clSetKernelArg(kernel, argi++, sizeof(cl_mem), &abs_facts_buff);
-    checkError(status, "Failed to set argument %d", argi - 1);
+  status = clSetKernelArg(kernel, argi++, sizeof(cl_float), &dt);
+  checkError(status, "Failed to set argument %d", argi - 1);
 
-    status = clSetKernelArg(kernel, argi++, sizeof(cl_mem), &prev_buff);
-    checkError(status, "Failed to set argument %d", argi - 1);
+  status = clSetKernelArg(kernel, argi++, sizeof(cl_mem), &velocity_buff);
+  checkError(status, "Failed to set argument %d", argi - 1);
 
-    status = clSetKernelArg(kernel, argi++, sizeof(cl_mem), &curr_buff);
-    checkError(status, "Failed to set argument %d", argi - 1);
+  status = clSetKernelArg(kernel, argi++, sizeof(cl_mem), &density_buff);
+  checkError(status, "Failed to set argument %d", argi - 1);
 
-    status = clSetKernelArg(kernel, argi++, sizeof(cl_mem), &next_buff);
-    checkError(status, "Failed to set argument %d", argi - 1);
+  status = clSetKernelArg(kernel, argi++, sizeof(cl_mem), &abs_facts_buff);
+  checkError(status, "Failed to set argument %d", argi - 1);
 
-    status = clEnqueueTask(queue, kernel, buffer_num, write_event, &kernel_event);
-    checkError(status, "Failed to launch kernel");
+  status = clSetKernelArg(kernel, argi++, sizeof(cl_mem), &source_buff);
+  checkError(status, "Failed to set argument %d", argi - 1);
 
-    //Read the result. This the final operation.
-    status = clEnqueueReadBuffer(queue, next_buff, CL_FALSE,
-          0,  nx*(nz-6)*sizeof(cl_float), fields[next_idx]+3*nx, 1, &kernel_event, &finish_event);
-    
-   // Release local events.
-    for (int event_number = 0; event_number < buffer_num; ++event_number) {
-      clReleaseEvent(write_event[event_number]);
-    }
+  status = clSetKernelArg(kernel, argi++, sizeof(cl_mem), &prev_buff);
+  checkError(status, "Failed to set argument %d", argi - 1);
 
-    // Wait for all devices to finish.
- 
-    clWaitForEvents(num_devices, &finish_event);
-    clReleaseEvent(kernel_event);
-    clReleaseEvent(finish_event);
+  status = clSetKernelArg(kernel, argi++, sizeof(cl_mem), &curr_buff);
+  checkError(status, "Failed to set argument %d", argi - 1);
 
-    //Get result for next field
-    memcpy(fields[next_idx], fields[next_idx]+4*nx, nx*sizeof(float));
-    memcpy(fields[next_idx]+ nx, fields[next_idx]+3*nx, nx*sizeof(float));
-    memcpy(output+(nx-2*pad_size)*i, fields[next_idx]+receiver_depth*nx+pad_size, (nx-2*pad_size)*sizeof(float));
-    printf("iteration %d, output: %0.3f\n", i, output[(nx-2*pad_size)*i+150]);
+  status = clSetKernelArg(kernel, argi++, sizeof(cl_mem), &next_buff);
+  checkError(status, "Failed to set argument %d", argi - 1);
+
+  status = clSetKernelArg(kernel, argi++, sizeof(cl_mem), &output_buff);
+  checkError(status, "Failed to set argument %d", argi - 1);
+
+  status = clEnqueueTask(queue, kernel, buffer_num, write_event, &kernel_event);
+  checkError(status, "Failed to launch kernel");
+
+  status = clEnqueueReadBuffer(queue, output_buff, CL_FALSE,
+        0,  nx*time_steps*sizeof(cl_float), output, 1, &kernel_event, &finish_event);
+  
+  // Release local events.
+  for (int event_number = 0; event_number < buffer_num; ++event_number) {
+    clReleaseEvent(write_event[event_number]);
   }
+
+  // Wait for all devices to finish.
+ 
+  clWaitForEvents(num_devices, &finish_event);
+  clReleaseEvent(kernel_event);
+  clReleaseEvent(finish_event);
+
+
   const double end_time = getCurrentTimestamp();
   fprintf(log, "Total time usage: %0.3f\n", (end_time-start_time));
   fclose(log);
 
   FILE* fout;
   fout = fopen("./fpga.csv", "w");
-  fwrite(output, sizeof(float), (nx-2*pad_size)*time_steps, fout);
+  fwrite(output, sizeof(float), nx*time_steps, fout);
   fclose(fout);
 }
 
